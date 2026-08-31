@@ -1,89 +1,60 @@
 # RTSP Relay (Android 5.1+)
 
-Додаток для старих телефонів (Android 5.1 / API 22), який:
+Додаток для старих телефонів (Android 5.1 / API 22).
 
-1. Підключається до китайської IP-камери по RTSP
-2. (наступний крок) пересилає потік на сервер Railway + MediaMTX
-3. Працює у фоні через foreground-сервіс
+**Цільовий пристрій:** Archos 45b Neon (Android 5.1)
 
-## Телефон
+## Що вміє (v0.3.0)
 
-Протестовано / цільовий пристрій:
-- **Archos 45b Neon**
-- Android **5.1**
-- Kernel 3.10.65
-
-## Що вже працює
-
-- Поля для RTSP-адреси камери та адреси сервера
-- Кнопки ЗАПУСТИТИ / ЗУПИНИТИ
-- Foreground-сервіс + WakeLock (щоб Android не вбивав процес)
-- Перевірка реального TCP/RTSP з’єднання з камерою (OPTIONS + DESCRIBE)
-- Лог прямо в додатку
+- Перевірка RTSP-з’єднання з камерою (OPTIONS + DESCRIBE)
+- Foreground-сервіс + WakeLock
+- **FFmpeg relay** (copy, без перекодування): RTSP → RTMP або RTSP
+- Автоперезапуск FFmpeg при падінні
 - GitHub Actions збирає debug APK
 
-## Що ще треба зробити
+## FFmpeg binary (обов’язково для трансляції)
 
-Справжній **relay** (отримання RTP-пакетів → відправка на MediaMTX).
+Щоб реальний push працював, потрібен статичний `ffmpeg` для **armeabi-v7a**:
 
-Через обмеження API 22 найкращий варіант — **FFmpeg LTS** (`-c copy`, без перекодування).
-
-План:
-1. Додати старий FFmpegKit LTS (API 16+) або бандл `ffmpeg` binary
-2. Команда приблизно така:
+1. Поклади файл сюди:
    ```
-   ffmpeg -rtsp_transport tcp -i "rtsp://камера" -c copy -f rtsp "rtsp://railway/cam"
+   app/src/main/assets/ffmpeg
    ```
-   або через RTMP:
+2. Бінарник має вміти: RTSP input, RTMP/FLV output, `-c copy`
+3. Перезбери APK
+
+Без цього файлу додаток лише перевіряє камеру і пише в лог, що FFmpeg відсутній.
+
+## Використання
+
+1. RTSP камери, наприклад:
    ```
-   ffmpeg -rtsp_transport tcp -i "rtsp://камера" -c copy -f flv "rtmp://railway/live/cam"
+   rtsp://192.168.1.109:554/user=admin&password=&channel=1&stream=0.sdp
    ```
-3. Підняти MediaMTX на Railway з TCP Proxy
-
-## Як зібрати APK
-
-GitHub Actions автоматично збирає APK на кожен push.
-
-Артефакт: `rtsp-relay-debug`
-
-Або локально (потрібен Android SDK):
-
-```bash
-./gradlew assembleDebug
-```
-
-## Приклад RTSP URL
-
-Багато китайських камер:
-
-```
-rtsp://192.168.1.109:554/user=admin&password=&channel=1&stream=0.sdp
-```
-
-або
-
-```
-rtsp://admin:password@192.168.1.109:554/Streaming/Channels/101
-```
+2. Адреса сервера (після Railway/MediaMTX):
+   ```
+   rtmp://HOST:PORT/cam
+   ```
+   або
+   ```
+   rtsp://HOST:PORT/cam
+   ```
+3. ЗАПУСТИТИ
 
 ## Архітектура
 
 ```
-Китайська камера (LAN)
-        │ RTSP
-        ▼
-  Archos 45b Neon
-  (цей додаток)
-        │ інтернет
-        ▼
-     Railway
-   MediaMTX / FFmpeg
-        │
-        ▼
-  Публічний RTSP / HLS
+Камера (LAN) --RTSP--> Archos 5.1 --FFmpeg--> MediaMTX (Railway)
+                                              |
+                                         RTSP / HLS / RTMP
+                                              |
+                                         Ти дивишся
 ```
 
-## Важливо про трафік
+## Збірка
 
-Камера ~2 Мбіт/с ≈ 21 ГБ/добу в один бік.  
-Railway може стати дорогим при 24/7 трансляції. Спочатку тестуйте коротко.
+GitHub Actions → артефакт `rtsp-relay-debug`
+
+```bash
+gradle assembleDebug
+```

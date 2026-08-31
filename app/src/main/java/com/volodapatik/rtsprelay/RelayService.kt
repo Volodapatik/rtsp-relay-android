@@ -41,6 +41,7 @@ class RelayService : Service() {
     private var wakeLock: PowerManager.WakeLock? = null
     private val running = AtomicBoolean(false)
     private var worker: Thread? = null
+    private var ffmpegRelay: FfmpegRelay? = null
     private val logBuffer = StringBuilder()
 
     override fun onCreate() {
@@ -64,7 +65,8 @@ class RelayService : Service() {
                 val server = intent?.getStringExtra(EXTRA_SERVER_URL) ?: ""
                 if (rtsp.isNotBlank() && running.compareAndSet(false, true)) {
                     startForeground(NOTIF_ID, buildNotification("Запуск..."))
-                    wakeLock?.acquire(60 * 60 * 1000L) // max 1 година за раз
+                    // Тримай WakeLock довше для 24/7 (перезапуск сервісу оновить)
+                    wakeLock?.acquire(12 * 60 * 60 * 1000L)
                     startRelay(rtsp, server)
                 }
             }
@@ -89,13 +91,11 @@ class RelayService : Service() {
                 }
 
                 appendLog("Камера відповіла (RTSP OK)")
-                updateNotification("Камера OK, очікування сервера")
 
                 if (serverUrl.isBlank()) {
-                    appendLog("Сервер не вказано — працюємо в режимі тільки перевірки")
-                    appendLog("Вкажи адресу Railway/MediaMTX і перезапусти")
+                    appendLog("Сервер не вказано — лише перевірка камери")
+                    appendLog("Вкажи RTMP/RTSP адресу сервера і перезапусти")
                     broadcastStatus("камера OK (сервер не задано)", true)
-                    // Тримаємо сервіс живим, щоб користувач бачив статус
                     while (running.get()) {
                         Thread.sleep(5000)
                     }
@@ -103,18 +103,60 @@ class RelayService : Service() {
                 }
 
                 appendLog("Сервер: $serverUrl")
-                appendLog("Реальний relay (FFmpeg / push) ще в розробці")
-                appendLog("Зараз: тільки перевірка з'єднання з камерою")
-                broadcastStatus("камера OK (relay незабаром)", true)
+                broadcastStatus("запуск FFmpeg relay...", true)
+                updateNotification("Relay: запуск FFmpeg")
 
+                val relay = FfmpegRelay(this@RelayService) { msg -> appendLog(msg) }
+                ffmpegRelay = relay
+
+                val started = relay.start(rtspUrl, serverUrl)
+                if (!started) {
+                    appendLog("FFmpeg не запустився.")
+                    appendLog("Потрібен binary: app/src/main/assets/ffmpeg")
+                    appendLog("(armeabi-v7a, static, з RTSP+RTMP)")
+                    broadcastStatus("немає FFmpeg binary", true)
+                    // Тримаємо сервіс, щоб лог було видно
+                    while (running.get()) {
+                        Thread.sleep(5000)
+                    }
+                    return@thread
+                }
+
+                appendLog("FFmpeg запущено — йде трансляція")
+                broadcastStatus("трансляція йде", true)
+                updateNotification("Трансляція активна")
+
+                // Слідкуємо за процесом, при падінні пробуємо перезапуск
+                var restarts = 0
                 while (running.get()) {
-                    Thread.sleep(5000)
+                    Thread.sleep(3000)
+                    if (!relay.isAlive()) {
+                        appendLog("FFmpeg зупинився")
+                        if (!running.get()) break
+                        if (restarts >= 10) {
+                            appendLog("Забагато перезапусків, стоп")
+                            broadcastStatus("FFmpeg впав", false)
+                            break
+                        }
+                        restarts++
+                        appendLog("Перезапуск FFmpeg (#$restarts)...")
+                        Thread.sleep(2000)
+                        if (!running.get()) break
+                        if (!relay.start(rtspUrl, serverUrl)) {
+                            appendLog("Перезапуск не вдався")
+                            broadcastStatus("помилка relay", false)
+                            break
+                        }
+                        broadcastStatus("трансляція йде (restart)", true)
+                    }
                 }
             } catch (e: Exception) {
                 Log.e(TAG, "Relay error", e)
                 appendLog("Помилка: ${e.message}")
                 broadcastStatus("помилка: ${e.message}", false)
             } finally {
+                ffmpegRelay?.stop()
+                ffmpegRelay = null
                 running.set(false)
                 try {
                     wakeLock?.release()
@@ -124,11 +166,6 @@ class RelayService : Service() {
         }
     }
 
-    /**
-     * Проста перевірка RTSP поверх TCP.
-     * Відправляє OPTIONS + DESCRIBE і дивиться, чи камера відповідає.
-     * Працює на API 22 без сторонніх бібліотек.
-     */
     private fun testRtspConnection(rtspUrl: String): Boolean {
         return try {
             val uri = Uri.parse(rtspUrl)
@@ -144,30 +181,26 @@ class RelayService : Service() {
                 val writer = OutputStreamWriter(socket.getOutputStream(), Charsets.UTF_8)
                 val reader = BufferedReader(InputStreamReader(socket.getInputStream(), Charsets.UTF_8))
 
-                // OPTIONS
                 val options = buildString {
                     append("OPTIONS $rtspUrl RTSP/1.0\r\n")
                     append("CSeq: 1\r\n")
-                    append("User-Agent: RTSPRelay/0.2\r\n")
+                    append("User-Agent: RTSPRelay/0.3\r\n")
                     append("\r\n")
                 }
                 writer.write(options)
                 writer.flush()
-
                 val optionsResp = readRtspResponse(reader)
                 appendLog("OPTIONS → ${optionsResp.firstLine}")
 
-                // DESCRIBE
                 val describe = buildString {
                     append("DESCRIBE $rtspUrl RTSP/1.0\r\n")
                     append("CSeq: 2\r\n")
                     append("Accept: application/sdp\r\n")
-                    append("User-Agent: RTSPRelay/0.2\r\n")
+                    append("User-Agent: RTSPRelay/0.3\r\n")
                     append("\r\n")
                 }
                 writer.write(describe)
                 writer.flush()
-
                 val describeResp = readRtspResponse(reader)
                 appendLog("DESCRIBE → ${describeResp.firstLine}")
 
@@ -218,6 +251,8 @@ class RelayService : Service() {
 
     private fun stopRelay() {
         running.set(false)
+        ffmpegRelay?.stop()
+        ffmpegRelay = null
         worker?.interrupt()
         worker = null
         try {
@@ -233,9 +268,8 @@ class RelayService : Service() {
         synchronized(logBuffer) {
             if (logBuffer.isNotEmpty()) logBuffer.append('\n')
             logBuffer.append(msg)
-            // Обмежуємо розмір логу
-            if (logBuffer.length > 2000) {
-                logBuffer.delete(0, logBuffer.length - 1500)
+            if (logBuffer.length > 2500) {
+                logBuffer.delete(0, logBuffer.length - 1800)
             }
         }
         broadcastStatus(null, running.get())
