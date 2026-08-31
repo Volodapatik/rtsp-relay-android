@@ -24,6 +24,23 @@ jobs:
         run: |
           sdkmanager "platforms;android-34" "build-tools;34.0.0" "platform-tools"
 
+      - name: Download FFmpeg binary (armeabi-v7a / Android arm)
+        run: |
+          mkdir -p app/src/main/assets
+          curl -L -o /tmp/ffmpeg-android-arm.zip \
+            "https://github.com/Tyrrrz/FFmpegBin/releases/download/8.1.2/ffmpeg-android-arm.zip"
+          unzip -o /tmp/ffmpeg-android-arm.zip -d /tmp/ffmpeg-arm
+          # Find the ffmpeg executable inside the zip
+          FFMPEG_BIN=$(find /tmp/ffmpeg-arm -type f -name 'ffmpeg' | head -n 1)
+          if [ -z "$FFMPEG_BIN" ]; then
+            FFMPEG_BIN=$(find /tmp/ffmpeg-arm -type f | head -n 1)
+          fi
+          echo "Using: $FFMPEG_BIN"
+          cp "$FFMPEG_BIN" app/src/main/assets/ffmpeg
+          chmod +x app/src/main/assets/ffmpeg
+          ls -la app/src/main/assets/
+          file app/src/main/assets/ffmpeg || true
+
       - name: Set up Gradle 7.5
         uses: gradle/actions/setup-gradle@v4
         with:
