@@ -9,11 +9,12 @@ import java.io.InputStreamReader
 import java.util.concurrent.atomic.AtomicBoolean
 
 /**
- * Runs a bundled (or extracted) ffmpeg binary to relay RTSP -> RTSP/RTMP.
+ * Runs a bundled ffmpeg binary to relay RTSP -> RTSP/RTMP.
  * Designed for Android 5.1 (API 22), armeabi-v7a.
  *
- * Place a static ffmpeg binary at: app/src/main/assets/ffmpeg
- * (armeabi-v7a / armv7, ideally with RTSP + RTMP support, -c copy capable)
+ * Assets expected:
+ *  - ffmpeg
+ *  - libc++_shared.so  (if ffmpeg is dynamically linked)
  */
 class FfmpegRelay(
     private val context: Context,
@@ -21,40 +22,52 @@ class FfmpegRelay(
 ) {
     companion object {
         private const val TAG = "FfmpegRelay"
-        private const val ASSET_NAME = "ffmpeg"
+        private const val ASSET_FFMPEG = "ffmpeg"
+        private const val ASSET_LIBCXX = "libc++_shared.so"
     }
 
     private var process: Process? = null
     private val stopped = AtomicBoolean(false)
+    private var libDir: File? = null
 
     fun ensureBinary(): File? {
-        val out = File(context.filesDir, "ffmpeg")
+        val dir = context.filesDir
+        libDir = dir
+        val out = File(dir, ASSET_FFMPEG)
         try {
-            if (out.exists() && out.canExecute() && out.length() > 100_000) {
-                return out
-            }
-            // Try copy from assets
-            context.assets.open(ASSET_NAME).use { input ->
+            // Always refresh from assets so updates apply after APK upgrade
+            context.assets.open(ASSET_FFMPEG).use { input ->
                 FileOutputStream(out).use { output ->
                     input.copyTo(output)
                 }
             }
             out.setReadable(true, true)
             out.setExecutable(true, true)
+
+            // Optional C++ runtime next to binary
+            try {
+                val libOut = File(dir, ASSET_LIBCXX)
+                context.assets.open(ASSET_LIBCXX).use { input ->
+                    FileOutputStream(libOut).use { output ->
+                        input.copyTo(output)
+                    }
+                }
+                libOut.setReadable(true, true)
+                onLog("libc++_shared.so extracted (${libOut.length() / 1024} KB)")
+            } catch (e: Exception) {
+                Log.w(TAG, "No libc++_shared.so in assets", e)
+                onLog("libc++_shared.so немає в assets (може знадобитися)")
+            }
+
             onLog("FFmpeg binary extracted (${out.length() / 1024} KB)")
             return out
         } catch (e: Exception) {
             Log.w(TAG, "No ffmpeg in assets", e)
             onLog("FFmpeg binary відсутній у assets/")
-            onLog("Потрібен файл assets/ffmpeg (armeabi-v7a)")
             return if (out.exists() && out.canExecute()) out else null
         }
     }
 
-    /**
-     * Build ffmpeg args for copy-relay (no re-encode).
-     * Supports rtmp:// and rtsp:// destinations.
-     */
     fun buildCommand(ffmpegPath: String, rtspUrl: String, serverUrl: String): List<String> {
         val dest = serverUrl.trim()
         val args = mutableListOf(
@@ -78,7 +91,6 @@ class FfmpegRelay(
                 args.add(dest)
             }
             else -> {
-                // default try RTSP
                 args.add("rtsp")
                 args.add("-rtsp_transport")
                 args.add("tcp")
@@ -99,9 +111,19 @@ class FfmpegRelay(
             val pb = ProcessBuilder(cmd)
                 .redirectErrorStream(true)
                 .directory(context.filesDir)
+
+            // Critical for dynamically linked ffmpeg on old Android
+            val env = pb.environment()
+            val libPath = (libDir ?: context.filesDir).absolutePath
+            val existing = env["LD_LIBRARY_PATH"]
+            env["LD_LIBRARY_PATH"] = if (existing.isNullOrBlank()) {
+                libPath
+            } else {
+                "$libPath:$existing"
+            }
+
             process = pb.start()
 
-            // Drain stdout so process doesn't block
             Thread {
                 try {
                     BufferedReader(InputStreamReader(process!!.inputStream)).use { reader ->
@@ -109,7 +131,7 @@ class FfmpegRelay(
                         while (reader.readLine().also { line = it } != null) {
                             if (stopped.get()) break
                             val l = line ?: continue
-                            if (l.isNotBlank()) onLog("ffmpeg: ${l.take(200)}")
+                            if (l.isNotBlank()) onLog("ffmpeg: ${l.take(220)}")
                         }
                     }
                 } catch (_: Exception) {
@@ -140,7 +162,6 @@ class FfmpegRelay(
         } catch (_: Exception) {
         }
         try {
-            // Android 8+ has destroyForcibly; API 22 only has destroy()
             process?.waitFor()
         } catch (_: Exception) {
         }

@@ -20,24 +20,43 @@ jobs:
       - name: Setup Android SDK
         uses: android-actions/setup-android@v3
 
-      - name: Install Android SDK packages
+      - name: Install Android SDK packages + NDK
         run: |
-          sdkmanager "platforms;android-34" "build-tools;34.0.0" "platform-tools"
+          sdkmanager "platforms;android-34" "build-tools;34.0.0" "platform-tools" "ndk;26.1.10909125"
 
-      - name: Download FFmpeg binary (armeabi-v7a / Android arm)
+      - name: Download FFmpeg binary + libc++_shared.so (armeabi-v7a)
         run: |
           mkdir -p app/src/main/assets
+
+          # FFmpeg (Android arm / armeabi-v7a)
           curl -L -o /tmp/ffmpeg-android-arm.zip \
             "https://github.com/Tyrrrz/FFmpegBin/releases/download/8.1.2/ffmpeg-android-arm.zip"
           unzip -o /tmp/ffmpeg-android-arm.zip -d /tmp/ffmpeg-arm
-          # Find the ffmpeg executable inside the zip
           FFMPEG_BIN=$(find /tmp/ffmpeg-arm -type f -name 'ffmpeg' | head -n 1)
           if [ -z "$FFMPEG_BIN" ]; then
             FFMPEG_BIN=$(find /tmp/ffmpeg-arm -type f | head -n 1)
           fi
-          echo "Using: $FFMPEG_BIN"
+          echo "FFmpeg: $FFMPEG_BIN"
           cp "$FFMPEG_BIN" app/src/main/assets/ffmpeg
           chmod +x app/src/main/assets/ffmpeg
+
+          # libc++_shared.so from NDK (needed by this ffmpeg build)
+          NDK_ROOT="$ANDROID_HOME/ndk/26.1.10909125"
+          LIBCXX=$(find "$NDK_ROOT" -path "*/android-21/arch-arm/usr/lib/libc++_shared.so" | head -n 1)
+          if [ -z "$LIBCXX" ]; then
+            LIBCXX=$(find "$NDK_ROOT" -path "*/armeabi-v7a/libc++_shared.so" | head -n 1)
+          fi
+          if [ -z "$LIBCXX" ]; then
+            LIBCXX=$(find "$NDK_ROOT" -name 'libc++_shared.so' | grep -E 'arm|armeabi' | head -n 1)
+          fi
+          echo "libc++_shared: $LIBCXX"
+          if [ -n "$LIBCXX" ]; then
+            cp "$LIBCXX" app/src/main/assets/libc++_shared.so
+          else
+            echo "WARNING: libc++_shared.so not found in NDK"
+            find "$NDK_ROOT" -name 'libc++_shared.so' | head -20 || true
+          fi
+
           ls -la app/src/main/assets/
           file app/src/main/assets/ffmpeg || true
 
