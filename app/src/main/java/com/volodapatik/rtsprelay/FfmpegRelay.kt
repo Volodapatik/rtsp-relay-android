@@ -11,10 +11,6 @@ import java.util.concurrent.atomic.AtomicBoolean
 /**
  * Runs a bundled ffmpeg binary to relay RTSP -> RTSP/RTMP.
  * Designed for Android 5.1 (API 22), armeabi-v7a.
- *
- * Assets expected:
- *  - ffmpeg
- *  - libc++_shared.so  (if ffmpeg is dynamically linked)
  */
 class FfmpegRelay(
     private val context: Context,
@@ -35,28 +31,21 @@ class FfmpegRelay(
         libDir = dir
         val out = File(dir, ASSET_FFMPEG)
         try {
-            // Always refresh from assets so updates apply after APK upgrade
             context.assets.open(ASSET_FFMPEG).use { input ->
-                FileOutputStream(out).use { output ->
-                    input.copyTo(output)
-                }
+                FileOutputStream(out).use { output -> input.copyTo(output) }
             }
             out.setReadable(true, true)
             out.setExecutable(true, true)
 
-            // Optional C++ runtime next to binary
             try {
                 val libOut = File(dir, ASSET_LIBCXX)
                 context.assets.open(ASSET_LIBCXX).use { input ->
-                    FileOutputStream(libOut).use { output ->
-                        input.copyTo(output)
-                    }
+                    FileOutputStream(libOut).use { output -> input.copyTo(output) }
                 }
                 libOut.setReadable(true, true)
                 onLog("libc++_shared.so extracted (${libOut.length() / 1024} KB)")
             } catch (e: Exception) {
                 Log.w(TAG, "No libc++_shared.so in assets", e)
-                onLog("libc++_shared.so немає в assets (може знадобитися)")
             }
 
             onLog("FFmpeg binary extracted (${out.length() / 1024} KB)")
@@ -70,27 +59,29 @@ class FfmpegRelay(
 
     fun buildCommand(ffmpegPath: String, rtspUrl: String, serverUrl: String): List<String> {
         val dest = serverUrl.trim()
+        // Flags tuned for flaky Chinese IP camera RTSP over TCP
         val args = mutableListOf(
             ffmpegPath,
             "-hide_banner",
             "-loglevel", "warning",
             "-rtsp_transport", "tcp",
+            "-rtsp_flags", "prefer_tcp",
+            "-fflags", "+genpts+discardcorrupt+igndts",
+            "-err_detect", "ignore_err",
+            "-use_wallclock_as_timestamps", "1",
             "-i", rtspUrl,
             "-c", "copy",
-            "-f"
+            "-flush_packets", "1"
         )
         when {
             dest.startsWith("rtmp://", ignoreCase = true) -> {
+                args.add("-f")
                 args.add("flv")
                 args.add(dest)
             }
-            dest.startsWith("rtsp://", ignoreCase = true) -> {
-                args.add("rtsp")
-                args.add("-rtsp_transport")
-                args.add("tcp")
-                args.add(dest)
-            }
             else -> {
+                // RTSP publish to MediaMTX
+                args.add("-f")
                 args.add("rtsp")
                 args.add("-rtsp_transport")
                 args.add("tcp")
@@ -105,22 +96,17 @@ class FfmpegRelay(
         val bin = ensureBinary() ?: return false
 
         val cmd = buildCommand(bin.absolutePath, rtspUrl, serverUrl)
-        onLog("FFmpeg: ${cmd.joinToString(" ").take(180)}...")
+        onLog("FFmpeg: ${cmd.joinToString(" ").take(200)}...")
 
         return try {
             val pb = ProcessBuilder(cmd)
                 .redirectErrorStream(true)
                 .directory(context.filesDir)
 
-            // Critical for dynamically linked ffmpeg on old Android
             val env = pb.environment()
             val libPath = (libDir ?: context.filesDir).absolutePath
             val existing = env["LD_LIBRARY_PATH"]
-            env["LD_LIBRARY_PATH"] = if (existing.isNullOrBlank()) {
-                libPath
-            } else {
-                "$libPath:$existing"
-            }
+            env["LD_LIBRARY_PATH"] = if (existing.isNullOrBlank()) libPath else "$libPath:$existing"
 
             process = pb.start()
 
@@ -157,14 +143,8 @@ class FfmpegRelay(
 
     fun stop() {
         stopped.set(true)
-        try {
-            process?.destroy()
-        } catch (_: Exception) {
-        }
-        try {
-            process?.waitFor()
-        } catch (_: Exception) {
-        }
+        try { process?.destroy() } catch (_: Exception) {}
+        try { process?.waitFor() } catch (_: Exception) {}
         process = null
     }
 }
